@@ -19,25 +19,31 @@
 
 # We import hydralit like this to replace the previous stuff
 # we had with native streamlit as it lets ur replace things 1:1
-from sd_utils import st, hc, load_configs, load_css, set_logger_verbosity,\
-     logger, quiesce_logger, set_page_title, threading, random
+#import hydralit as st
+import collections.abc
+from sd_utils import *
 
 # streamlit imports
 import streamlit_nested_layout
 
-#streamlit components section
+# streamlit components section
 #from st_on_hover_tabs import on_hover_tabs
 from streamlit_server_state import server_state, server_state_lock
 
-#other imports
+# other imports
+
+import warnings
+import os
+import toml
+import k_diffusion as K
+from omegaconf import OmegaConf
 import argparse
-from sd_utils.bridge import run_bridge
 
 # import custom components
 from custom_components import draggable_number_input
 
 # end of imports
-#---------------------------------------------------------------------------------------------------------------
+# ---------------------------------------------------------------------------------------------------------------
 
 load_configs()
 
@@ -47,152 +53,233 @@ As a result using "streamlit run webui_streamlit.py --headless"
 will show the help for streamlit itself and not pass any argument to our app,
 we need to use "streamlit run webui_streamlit.py -- --headless"
 in order to pass a command argument to this app."""
-parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+parser = argparse.ArgumentParser(
+    formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
-parser.add_argument("--headless", action='store_true', help="Don't launch web server, util if you just want to run the stable horde bridge.", default=False)
+parser.add_argument("--headless", action='store_true',
+                    help="Don't launch web server, util if you just want to run the stable horde bridge.", default=False)
 
-parser.add_argument("--bridge", action='store_true', help="don't launch web server, but make this instance into a Horde bridge.", default=False)
-parser.add_argument('--horde_api_key', action="store", required=False, type=str, help="The API key corresponding to the owner of this Horde instance")
-parser.add_argument('--horde_name', action="store", required=False, type=str, help="The server name for the Horde. It will be shown to the world and there can be only one.")
-parser.add_argument('--horde_url', action="store", required=False, type=str, help="The SH Horde URL. Where the bridge will pickup prompts and send the finished generations.")
-parser.add_argument('--horde_priority_usernames',type=str, action='append', required=False, help="Usernames which get priority use in this horde instance. The owner's username is always in this list.")
-parser.add_argument('--horde_max_power',type=int, required=False, help="How much power this instance has to generate pictures. Min: 2")
-parser.add_argument('--horde_sfw', action='store_true', required=False, help="Set to true if you do not want this worker generating NSFW images.")
-parser.add_argument('--horde_blacklist', nargs='+', required=False, help="List the words that you want to blacklist.")
-parser.add_argument('--horde_censorlist', nargs='+', required=False, help="List the words that you want to censor.")
-parser.add_argument('--horde_censor_nsfw', action='store_true', required=False, help="Set to true if you want this bridge worker to censor NSFW images.")
-parser.add_argument('--horde_model', action='store', required=False, help="Which model to run on this horde.")
-parser.add_argument('-v', '--verbosity', action='count', default=0, help="The default logging level is ERROR or higher. This value increases the amount of logging seen in your screen")
-parser.add_argument('-q', '--quiet', action='count', default=0, help="The default logging level is ERROR or higher. This value decreases the amount of logging seen in your screen")
+parser.add_argument("--bridge", action='store_true',
+                    help="don't launch web server, but make this instance into a Horde bridge.", default=False)
+parser.add_argument('--horde_api_key', action="store", required=False, type=str,
+                    help="The API key corresponding to the owner of this Horde instance")
+parser.add_argument('--horde_name', action="store", required=False, type=str,
+                    help="The server name for the Horde. It will be shown to the world and there can be only one.")
+parser.add_argument('--horde_url', action="store", required=False, type=str,
+                    help="The SH Horde URL. Where the bridge will pickup prompts and send the finished generations.")
+parser.add_argument('--horde_priority_usernames', type=str, action='append', required=False,
+                    help="Usernames which get priority use in this horde instance. The owner's username is always in this list.")
+parser.add_argument('--horde_max_power', type=int, required=False,
+                    help="How much power this instance has to generate pictures. Min: 2")
+parser.add_argument('--horde_sfw', action='store_true', required=False,
+                    help="Set to true if you do not want this worker generating NSFW images.")
+parser.add_argument('--horde_blacklist', nargs='+', required=False,
+                    help="List the words that you want to blacklist.")
+parser.add_argument('--horde_censorlist', nargs='+', required=False,
+                    help="List the words that you want to censor.")
+parser.add_argument('--horde_censor_nsfw', action='store_true', required=False,
+                    help="Set to true if you want this bridge worker to censor NSFW images.")
+parser.add_argument('--horde_model', action='store',
+                    required=False, help="Which model to run on this horde.")
+parser.add_argument('-v', '--verbosity', action='count', default=0,
+                    help="The default logging level is ERROR or higher. This value increases the amount of logging seen in your screen")
+parser.add_argument('-q', '--quiet', action='count', default=0,
+                    help="The default logging level is ERROR or higher. This value decreases the amount of logging seen in your screen")
 opt = parser.parse_args()
 
 with server_state_lock["bridge"]:
     server_state["bridge"] = opt.bridge
 
+try:
+    # this silences the annoying "Some weights of the model checkpoint were not used when initializing..." message at start.
+    from transformers import logging
+
+    logging.set_verbosity_error()
+except:
+    pass
+
+# remove some annoying deprecation warnings that show every now and then.
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
+
+# this should force GFPGAN and RealESRGAN onto the selected gpu as well
+# os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"   # see issue #152
+#os.environ["CUDA_VISIBLE_DEVICES"] = str(st.session_state["defaults"].general.gpu)
+
+
+# functions to load css locally OR remotely starts here. Options exist for future flexibility. Called as st.markdown with unsafe_allow_html as css injection
+# TODO, maybe look into async loading the file especially for remote fetching
+def local_css(file_name):
+    with open(file_name) as f:
+        st.markdown(f'<style>{f.read()}</style>', unsafe_allow_html=True)
+
+
+def remote_css(url):
+    st.markdown(f'<link href="{url}" rel="stylesheet">',
+                unsafe_allow_html=True)
+
+
+def load_css(isLocal, nameOrURL):
+    if (isLocal):
+        local_css(nameOrURL)
+    else:
+        remote_css(nameOrURL)
+
+
 @logger.catch(reraise=True)
 def layout():
-        """Layout functions to define all the streamlit layout here."""
-        if not st.session_state["defaults"].debug.enable_hydralit:
-            st.set_page_config(page_title="Stable Diffusion Playground", layout="wide", initial_sidebar_state="collapsed")
+    """Layout functions to define all the streamlit layout here."""
+    if not st.session_state["defaults"].debug.enable_hydralit:
+        st.set_page_config(page_title="Stable Diffusion Playground",
+                           layout="wide", initial_sidebar_state="collapsed")
 
-        #app = st.HydraApp(title='Stable Diffusion WebUI', favicon="", sidebar_state="expanded", layout="wide",
-                                        #hide_streamlit_markers=False, allow_url_nav=True , clear_cross_app_sessions=False)
+    # app = st.HydraApp(title='Stable Diffusion WebUI', favicon="", sidebar_state="expanded", layout="wide",
+        # hide_streamlit_markers=False, allow_url_nav=True , clear_cross_app_sessions=False)
 
-
+    with st.empty():
         # load css as an external file, function has an option to local or remote url. Potential use when running from cloud infra that might not have access to local path.
         load_css(True, 'frontend/css/streamlit.main.css')
 
-        #
-        # specify the primary menu definition
-        menu_data = [
-            {'id': 'Stable Diffusion', 'label': 'Stable Diffusion', 'icon': 'bi bi-grid-1x2-fill'},
-            {'id': 'Train','label':"Train", 'icon': "bi bi-lightbulb-fill", 'submenu':[
-                {'id': 'Textual Inversion', 'label': 'Textual Inversion', 'icon': 'bi bi-lightbulb-fill'},
-                {'id': 'Fine Tunning', 'label': 'Fine Tunning', 'icon': 'bi bi-lightbulb-fill'},
-                ]},
-            {'id': 'Model Manager', 'label': 'Model Manager', 'icon': 'bi bi-cloud-arrow-down-fill'},
-            {'id': 'Tools','label':"Tools", 'icon': "bi bi-tools", 'submenu':[
-                {'id': 'API Server', 'label': 'API Server', 'icon': 'bi bi-server'},
-                {'id': 'Barfi/BaklavaJS', 'label': 'Barfi/BaklavaJS', 'icon': 'bi bi-diagram-3-fill'},
-                #{'id': 'API Server', 'label': 'API Server', 'icon': 'bi bi-server'},
-                ]},
-            {'id': 'Settings', 'label': 'Settings', 'icon': 'bi bi-gear-fill'},
-        ]
+    #
+    # specify the primary menu definition
+    menu_data = [
+        {'id': 'Stable Diffusion', 'label': 'Stable Diffusion',
+            'icon': 'bi bi-grid-1x2-fill'},
+        {'id': 'Textual Inversion', 'label': 'Textual Inversion',
+            'icon': 'bi bi-lightbulb-fill'},
+        {'id': 'Model Manager', 'label': 'Model Manager',
+            'icon': 'bi bi-cloud-arrow-down-fill'},
+        {'id': 'Tools', 'label': "Tools", 'icon': "bi bi-tools", 'submenu': [
+            {'id': 'API Server', 'label': 'API Server', 'icon': 'bi bi-server'},
+            #{'id': 'Barfi/BaklavaJS', 'label': 'Barfi/BaklavaJS', 'icon': 'bi bi-diagram-3-fill'},
+            #{'id': 'API Server', 'label': 'API Server', 'icon': 'bi bi-server'},
+        ]},
+        {'id': 'Settings', 'label': 'Settings', 'icon': 'bi bi-gear-fill'},
+        # {'icon': "fa-solid fa-radar",'label':"Dropdown1", 'submenu':[
+        #    {'id':' subid11','icon': "fa fa-paperclip", 'label':"Sub-item 1"},{'id':'subid12','icon': "💀", 'label':"Sub-item 2"},{'id':'subid13','icon': "fa fa-database", 'label':"Sub-item 3"}]},
+        # {'icon': "far fa-chart-bar", 'label':"Chart"},#no tooltip message
+        #{'id':' Crazy return value 💀','icon': "💀", 'label':"Calendar"},
+        # {'icon': "fas fa-tachometer-alt", 'label':"Dashboard",'ttip':"I'm the Dashboard tooltip!"}, #can add a tooltip message
+        #{'icon': "far fa-copy", 'label':"Right End"},
+        #{'icon': "fa-solid fa-radar",'label':"Dropdown2", 'submenu':[{'label':"Sub-item 1", 'icon': "fa fa-meh"},{'label':"Sub-item 2"},{'icon':'🙉','label':"Sub-item 3",}]},
+    ]
 
-        over_theme = {'txc_inactive': '#FFFFFF', "menu_background":'#000000'}
+    over_theme = {'txc_inactive': '#FFFFFF', "menu_background": '#000000'}
 
-        menu_id = hc.nav_bar(
-            menu_definition=menu_data,
-            #home_name='Home',
-            #login_name='Logout',
-            hide_streamlit_markers=False,
-            override_theme=over_theme,
-            sticky_nav=True,
-            sticky_mode='pinned',
-        )
+    # menu_id = hc.nav_bar(
+    #     menu_definition=menu_data,
+    #     #home_name='Home',
+    #     #login_name='Logout',
+    #     hide_streamlit_markers=True,
+    #     override_theme=over_theme,
+    #     sticky_nav=True,
+    #     sticky_mode='pinned',
+    # )
 
-        #
-        #if menu_id == "Home":
-            #st.info("Under Construction. :construction_worker:")
+    # check if the models exist on their respective folders
+    with server_state_lock["GFPGAN_available"]:
+        if os.path.exists(os.path.join(st.session_state["defaults"].general.GFPGAN_dir, f"{st.session_state['defaults'].general.GFPGAN_model}.pth")):
+            server_state["GFPGAN_available"] = True
+        else:
+            server_state["GFPGAN_available"] = False
 
-        if menu_id == "Stable Diffusion":
-            # set the page url and title
-            #st.experimental_set_query_params(page='stable-diffusion')
-            try:
-                set_page_title("Stable Diffusion Playground")
-            except NameError:
-                st.experimental_rerun()
+    with server_state_lock["RealESRGAN_available"]:
+        if os.path.exists(os.path.join(st.session_state["defaults"].general.RealESRGAN_dir, f"{st.session_state['defaults'].general.RealESRGAN_model}.pth")):
+            server_state["RealESRGAN_available"] = True
+        else:
+            server_state["RealESRGAN_available"] = False
 
-            txt2img_tab, img2img_tab, txt2vid_tab, img2txt_tab, post_processing_tab, concept_library_tab = st.tabs(["Text-to-Image", "Image-to-Image",
-                                                                                                                    #"Inpainting",
-                                                                                                                    "Text-to-Video", "Image-To-Text",
-                                                                                                                    "Post-Processing","Concept Library"])
-            #with home_tab:
-                    #from home import layout
-                    #layout()
+    # with st.sidebar:
+        # page = on_hover_tabs(tabName=['Stable Diffusion', "Textual Inversion","Model Manager","Settings"],
+            # iconName=['dashboard','model_training' ,'cloud_download', 'settings'], default_choice=0)
 
-            with txt2img_tab:
-                from txt2img import layout
-                layout()
+        # need to see how to get the icons to show for the hydralit option_bar
+        # page = hc.option_bar([{'icon':'grid-outline','label':'Stable Diffusion'}, {'label':"Textual Inversion"},
+            # {'label':"Model Manager"},{'label':"Settings"}],
+            # horizontal_orientation=False,
+            # override_theme={'txc_inactive': 'white','menu_background':'#111', 'stVerticalBlock': '#111','txc_active':'yellow','option_active':'blue'})
 
-            with img2img_tab:
-                from img2img import layout
-                layout()
+    #
+    # if menu_id == "Home":
+        #st.info("Under Construction. :construction_worker:")
 
-            #with inpainting_tab:
-                #from inpainting import layout
-                #layout()
+    # if menu_id == "Stable Diffusion":
+        # set the page url and title
+        # st.experimental_set_query_params(page='stable-diffusion')
+    # try:
+    #     set_page_title("Stable Diffusion Playground")
+    # except NameError:
+    #     st.experimental_rerun()
 
-            with txt2vid_tab:
-                from txt2vid import layout
-                layout()
+    # txt2img_tab, img2img_tab, txt2vid_tab, img2txt_tab, concept_library_tab = st.tabs(["Text-to-Image", "Image-to-Image",
+    #                                                                                    "Text-to-Video", "Image-To-Text",
+    #                                                                                                "Concept Library"])
+    # with home_tab:
+            #from home import layout
+            # layout()
 
-            with img2txt_tab:
-                from img2txt import layout
-                layout()
+    # with txt2img_tab:
+    st.title("AI Speech-To-Image Demo with Stable Diffusion")
+    if "Extend Prompt" not in st.session_state:
+        st.session_state.extendPrompt = True
+    if "speechNeedsProcessing" not in st.session_state:
+        st.session_state.speechNeedsProcessing = False
+    if "successfulRecord" not in st.session_state:
+        st.session_state.successfulRecord = False
+    if "audioVal" not in st.session_state:
+        st.session_state.audioVal = None
+    from txt2img import layout
+    layout()
 
-            with post_processing_tab:
-                from post_processing import layout
-                layout()
+    # with img2img_tab:
+    #     from img2img import layout
+    #     layout()
 
-            with concept_library_tab:
-                from sd_concept_library import layout
-                layout()
+    # with inpainting_tab:
+    #from inpainting import layout
+    # layout()
 
-        #
-        elif menu_id == 'Model Manager':
-            set_page_title("Model Manager - Stable Diffusion Playground")
+    # with txt2vid_tab:
+    #     from txt2vid import layout
+    #     layout()
 
-            from ModelManager import layout
-            layout()
+    # with img2txt_tab:
+    #     from img2txt import layout
+    #     layout()
 
-        elif menu_id == 'Textual Inversion':
-            from textual_inversion import layout
-            layout()
+    # with concept_library_tab:
+    #     from sd_concept_library import layout
+    #     layout()
 
-        elif menu_id == 'Fine Tunning':
-            #from textual_inversion import layout
-            #layout()
-            st.info("Under Construction. :construction_worker:")
+    #
+    # elif menu_id == 'Model Manager':
+    #     set_page_title("Model Manager - Stable Diffusion Playground")
 
-        elif menu_id == 'API Server':
-            set_page_title("API Server - Stable Diffusion Playground")
-            from APIServer import layout
-            layout()
+    #     from ModelManager import layout
+    #     layout()
 
-        elif menu_id == 'Barfi/BaklavaJS':
-            set_page_title("Barfi/BaklavaJS - Stable Diffusion Playground")
-            from barfi_baklavajs import layout
-            layout()
+    # elif menu_id == 'Textual Inversion':
+    #     from textual_inversion import layout
+    #     layout()
 
-        elif menu_id == 'Settings':
-            set_page_title("Settings - Stable Diffusion Playground")
+    # elif menu_id == 'API Server':
+    #     set_page_title("API Server - Stable Diffusion Playground")
+    #     from APIServer import layout
+    #     layout()
 
-            from Settings import layout
-            layout()
+    # #elif menu_id == 'Barfi/BaklavaJS':
+    #     #set_page_title("Barfi/BaklavaJS - Stable Diffusion Playground")
+    #     #from barfi_baklavajs import layout
+    #     #layout()
 
-        # calling dragable input component module at the end, so it works on all pages
-        draggable_number_input.load()
+    # elif menu_id == 'Settings':
+    #     set_page_title("Settings - Stable Diffusion Playground")
+
+    #     from Settings import layout
+    #     layout()
+
+    # calling dragable input component module at the end, so it works on all pages
+    draggable_number_input.load()
 
 
 if __name__ == '__main__':
@@ -207,18 +294,21 @@ if __name__ == '__main__':
             try:
                 import bridgeData as cd
             except ModuleNotFoundError as e:
-                logger.warning("No bridgeData found. Falling back to default where no CLI args are set.")
+                logger.warning(
+                    "No bridgeData found. Falling back to default where no CLI args are set.")
                 logger.debug(str(e))
             except SyntaxError as e:
-                logger.warning("bridgeData found, but is malformed. Falling back to default where no CLI args are set.")
+                logger.warning(
+                    "bridgeData found, but is malformed. Falling back to default where no CLI args are set.")
                 logger.debug(str(e))
             except Exception as e:
-                logger.warning("No bridgeData found, use default where no CLI args are set")
+                logger.warning(
+                    "No bridgeData found, use default where no CLI args are set")
                 logger.debug(str(e))
             finally:
-                try: # check if cd exists (i.e. bridgeData loaded properly)
+                try:  # check if cd exists (i.e. bridgeData loaded properly)
                     cd
-                except: # if not, create defaults
+                except:  # if not, create defaults
                     class temp(object):
                         def __init__(self):
                             random.seed()
@@ -243,7 +333,8 @@ if __name__ == '__main__':
             horde_priority_usernames = opt.horde_priority_usernames if opt.horde_priority_usernames else cd.horde_priority_usernames
             horde_max_power = opt.horde_max_power if opt.horde_max_power else cd.horde_max_power
             # Not used yet
-            horde_models = [opt.horde_model] if opt.horde_model else cd.models_to_load
+            horde_models = [
+                opt.horde_model] if opt.horde_model else cd.models_to_load
             try:
                 horde_nsfw = not opt.horde_sfw if opt.horde_sfw else cd.horde_nsfw
             except AttributeError:
@@ -263,7 +354,8 @@ if __name__ == '__main__':
             if horde_max_power < 2:
                 horde_max_power = 2
             horde_max_pixels = 64*64*8*horde_max_power
-            logger.info(f"Joining Horde with parameters: Server Name '{horde_name}'. Horde URL '{horde_url}'. Max Pixels {horde_max_pixels}")
+            logger.info(
+                f"Joining Horde with parameters: Server Name '{horde_name}'. Horde URL '{horde_url}'. Max Pixels {horde_max_pixels}")
 
             try:
                 thread = threading.Thread(target=run_bridge(1, horde_api_key, horde_name, horde_url,

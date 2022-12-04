@@ -1,0 +1,13 @@
+steps to install:
+
+- clone 
+- install anaconda
+- run installer/install.sh
+- activate conda environment (ldm)
+-Install the following libraries:
+conda install PyAudio
+conda install git+https://github.com/Uberi/speech_recognition
+conda install tf-nightly
+conda install vosk
+- run webui.sh
+- select streamlit

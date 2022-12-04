@@ -89,3 +89,9 @@ scripts/bridgeData.py
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+
+installer/stable-diffusion-webui
+main.zip
+/model
+scripts/st_audiorec
+scripts/vosk-api
