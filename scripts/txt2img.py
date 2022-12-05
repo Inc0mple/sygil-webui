@@ -509,7 +509,7 @@ def layout():
             st.session_state.audioVal = val
             # retrieve audio data
             print(st.session_state.speechNeedsProcessing)
-            with st.spinner('analysing speech...'):
+            with hc.HyLoader('analysing speech...', hc.Loaders.standard_loaders, index=[0]):
                 ind, val = zip(*val['arr'].items())
                 ind = np.array(ind, dtype=int)  # convert to np array
                 val = np.array(val)             # convert to np array
