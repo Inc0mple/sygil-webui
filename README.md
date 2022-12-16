@@ -10,9 +10,9 @@
 - Activate conda environment (ldm) with `conda activate ldm`
 - Install the following libraries:
   - `conda install PyAudio`
-  - `conda install git+<https://github.com/Uberi/speech_recognition>`
-  - `conda install tf-nightly`
-  - `conda install vosk`
+  - `pip install git+https://github.com/Uberi/speech_recognition`
+  - `pip install tf-nightly`
+  - `pip install vosk`
 - Download and unzip [AI Megacentre Additional Files.7z](https://drive.google.com/file/d/1axXDdrIPYjWn_CbDFODdhjE2e3MAKO44/view?usp=sharing) which contain the STT widget, and the models for Image Generation and Speech-To-Text.
 - Copy the contents of the unzipped folder into sygil-webui, merging the `models` and `scripts` folder.
 
