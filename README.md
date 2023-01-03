@@ -6,7 +6,7 @@
 
 - Install Anaconda/Minconda
 - Clone <https://github.com/Inc0mple/sygil-webui>
-- Run `installer/install.sh`
+- Run `installer/install.sh` (if permission is denied, run `chmod installer/install.sh` first)
 - Activate conda environment (ldm) with `conda activate ldm`
 - Install the following libraries:
   - `conda install PyAudio`
